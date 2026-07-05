@@ -11,9 +11,22 @@ workstation and then `git clone`d onto the Pi; the app runs on the Pi only.
 - Access: over a Tailscale tailnet, interface `tailscale0`. LAN is `eth0`.
 - Docker + Docker Compose already installed and in use
 - Existing neighbour on this Pi: Jellyfin, running via Compose with
-  `network_mode: host`, UFW-scoped to `eth0` only
-- UFW is hardened — do NOT open ports globally. Scrutiny's web port should be
-  reachable **on the tailnet only** → `ufw allow in on tailscale0 to any port <n>`
+  `network_mode: host`, UFW-scoped to `eth0`
+
+### Network posture (verified 2026-07-05)
+
+- **UFW allows ALL ports inbound on `tailscale0`.** No per-port rule needed
+  for tailnet-facing services; they're reachable the moment they bind.
+- **UFW default-deny on `eth0`**, with per-port exceptions (Jellyfin is the
+  current one).
+- **Tailscale ACLs are the effective access control on the tailnet side** —
+  who on the tailnet can reach which services is enforced there, not in UFW.
+- Practical consequence for Scrutiny Phase 1: nothing to add to UFW. It
+  binds via `network_mode: host` on `:8080`, tailscale0 already permits
+  that, and every tailnet-enrolled device (including partner's) reaches it.
+  This is why Phase 2 (auth via Caddy) matters — it's the boundary that
+  keeps trusted tailnet devices from tweaking Scrutiny settings without
+  fiddling with Tailscale ACLs.
 
 ## The drive being monitored
 
@@ -174,17 +187,20 @@ much less because Jellyfin usually has the drive awake at that hour anyway.
 - **Port: 8080** (confirmed free on the Pi 2026-07-05 via `ss -tlnp`).
 - `network_mode: host` on the Scrutiny container — matches the existing
   Jellyfin pattern on this Pi. Scrutiny binds to `0.0.0.0:8080` and Influx
-  binds to `0.0.0.0:8086`; UFW's default-deny keeps 8086 unreachable
-  externally, and only 8080 is opened, only on tailscale0.
-- UFW rule on the Pi:
-  `sudo ufw allow in on tailscale0 to any port 8080 proto tcp comment 'scrutiny web (tailnet only)'`
-- Accepted risk: partner is on the tailnet and Scrutiny's UI is fully
-  writable (thresholds, notification endpoints, device labels — no
-  read-only mode exists in Scrutiny). Interim only until Phase 2.
+  binds to `0.0.0.0:8086`.
+- **No UFW change needed** — tailscale0 already permits all inbound ports
+  by policy. eth0 default-deny keeps 8080/8086 unreachable from the LAN.
+- Accepted risk: every tailnet device (including partner's) can reach and
+  modify Scrutiny's UI (thresholds, notification endpoints, device labels
+  — no read-only mode exists in Scrutiny). Phase 2's Caddy auth layer is
+  the boundary that fixes this without touching Tailscale ACLs.
 
 ## Web UI exposure — Phase 2 (deferred)
 
-Add a Caddy reverse proxy in front of Scrutiny with:
+Bundle these together — the proxy is a natural home for both:
+
+### 2a. Caddy reverse proxy with auth + TLS
+
 - HTTP Basic Auth (bcrypt-hashed password in Caddyfile).
   **Basic Auth is only safe over HTTPS** — TLS is not optional here.
 - TLS via one of:
@@ -194,11 +210,29 @@ Add a Caddy reverse proxy in front of Scrutiny with:
   - **Caddy `tls internal`** — Caddy generates a local CA and issues certs;
     covers every hostname/interface, but browsers warn until the Caddy CA
     root cert is installed on each client device.
-- Expose Caddy on `tailscale0` + `eth0`; keep Scrutiny bound to `127.0.0.1`
-  (proxy is the only path in).
+- Expose Caddy on `tailscale0` + `eth0`; take Scrutiny off `network_mode:
+  host` and bind it to a private Docker network (or bind its port to
+  `127.0.0.1`) so the proxy is the only path in.
 
-Trigger to do Phase 2: whenever the current no-auth situation feels wrong,
-or when access from a non-tailnet LAN device becomes desirable.
+### 2b. Live drive-state widget
+
+Scrutiny does not display current spindown state (standby/active). User
+asked for this and we chose to add it as a tiny companion service behind
+the same Caddy auth rather than a separate exposure:
+
+- Small service on the Pi (systemd timer or a lightweight sidecar
+  container) that runs `hdparm -C /dev/sdb` every ~30s and writes state to
+  a file, plus a minimal HTML/text endpoint that serves it.
+- Caddy proxies e.g. `/state` (same host) to that endpoint, protected by
+  the same basic auth as Scrutiny.
+- Zero SMART impact — hdparm's power-state check is the same lightweight
+  ATA command Scrutiny already uses safely.
+
+### Trigger
+
+Do Phase 2 when: the current no-auth situation feels wrong, access from a
+non-tailnet LAN device becomes desirable, or the drive-state visibility
+becomes actively useful (not just curiosity).
 
 ## Repo layout
 
@@ -225,9 +259,7 @@ cd ~/scrutiny-HDD-monitor
 docker compose up -d
 docker compose logs -f scrutiny          # sanity check; Ctrl-C when steady
 
-sudo ufw allow in on tailscale0 to any port 8080 proto tcp \
-  comment 'scrutiny web (tailnet only)'
-sudo ufw status verbose | grep 8080      # confirm rule active
+# No UFW rule needed — tailscale0 is blanket-allowed on this host.
 
 # Trigger a collector run to populate the dashboard
 docker exec scrutiny /opt/scrutiny/bin/scrutiny-collector-metrics run
