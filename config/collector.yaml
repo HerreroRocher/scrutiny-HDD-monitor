@@ -13,9 +13,14 @@ devices:
     # USB bridge is Realtek 0x0bda:0x9201 — smartctl needs -d sat to talk to it.
     type: 'sat'
     commands:
-      # -n standby makes smartctl exit 2 without touching the disk when it is
-      # in standby, preserving the 20-min hdparm spindown. Verified 2026-07-04
-      # on this exact hardware. See CLAUDE.md for the verification procedure.
-      # Both info_args and smart_args run every poll cycle, so both need it.
-      metrics_info_args:  '--info --json -n standby'
+      # metrics_info_args does NOT get -n standby. Verified 2026-07-05 that
+      # `smartctl --info --json -d sat` on this drive returns full device info
+      # while the drive is in standby, without spinning it up — the controller
+      # answers IDENTIFY DEVICE from cache. Adding -n standby here breaks the
+      # first-run device registration (exit 2 → no UUID → whole device skipped).
+      metrics_info_args:  '--info --json'
+      # metrics_smart_args DOES get -n standby. `--xall` reads live SMART
+      # attributes from the drive, which would otherwise force a spinup.
+      # smartctl exits 2 when standby, Scrutiny logs a skip and the dashboard
+      # retains last-known values until the drive is naturally awake.
       metrics_smart_args: '--xall --json -n standby'

@@ -70,42 +70,59 @@ invocation. Both keys below run on every poll cycle, so both need the flag.
 ```yaml
 version: 1
 host:
-  id: ""
+  id: "raspberrypi"
+
+allow_listed_devices:
+  - /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
 
 devices:
   - device: /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
     type: 'sat'
     commands:
-      metrics_info_args:  '--info --json -n standby'
-      metrics_smart_args: '--xall --json -n standby'
-
-allow_listed_devices:
-  - /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
+      metrics_info_args:  '--info --json'                 # NO -n standby (see below)
+      metrics_smart_args: '--xall --json -n standby'      # YES -n standby
 ```
 
-`allow_listed_devices` prevents Scrutiny from also trying to poll the SD card,
+`allow_listed_devices` prevents Scrutiny from also polling the SD card,
 eMMC, or zram device that `smartctl --scan` may return.
 
-### Open risk — verify empirically on first deploy
+### Why -n standby is on smart_args only — verified 2026-07-05
 
-When the drive is in standby, `smartctl -n standby` exits **2** with no
-JSON output. It is unknown whether Scrutiny's collector:
-- (good) treats exit(2) as "skip this cycle, retain last-known values", or
-- (bad) treats exit(2) as a hard error and drops/hides the device.
+First attempt put `-n standby` on both args. It failed:
+```
+level=info  msg="Executing command: smartctl --info --json -n standby --device sat /dev/disk/by-id/..."
+level=error msg="Could not retrieve device information for ...: exit status 2"
+level=error msg="Device ... has no scrutiny UUID; skipping (no data association possible)."
+```
+Scrutiny needs a successful `--info` on every cycle to associate the device
+with a UUID. Exit 2 → "unknown device" → whole device dropped for the cycle.
+No SMART poll is attempted after info fails.
 
-First-deploy verification steps:
-1. Deploy with the config above.
-2. Force standby: `sudo hdparm -y /dev/sdb`
-3. Wait for one collector cycle (default schedule is `0 0 * * *` — hourly in
-   omnibus, cron string in newer versions; check docker logs for the tick).
-4. Check `docker logs scrutiny` for the collector run. Expected: a log line
-   noting the device is in standby and the cycle was skipped.
-5. Confirm `sudo hdparm -C /dev/sdb` still says `standby` after the tick.
-6. Confirm the drive still appears in the web UI with previous SMART data.
+Follow-up test on the Pi:
+```
+sudo hdparm -y /dev/sdb                                 # force standby
+sudo smartctl --info --json -d sat /dev/sdb ; echo $?   # exit: 0
+sudo hdparm -C /dev/sdb                                 # still: standby
+```
+The WD's controller answers IDENTIFY DEVICE from cache without spinning up.
+So `--info` alone is safe to run against a sleeping drive on this specific
+disk+bridge. This is drive/bridge-specific behavior; if the drive is ever
+swapped, re-run that test before assuming it holds.
 
-If Scrutiny drops the device on exit(2), fallback plan: wrap smartctl in a
-small script that intercepts exit 2 and returns an empty-but-valid JSON
-document + exit 0. Point `metrics_smartctl_bin` at the wrapper.
+### Remaining open risk on smart_args
+
+`--xall` (SMART data) still exits 2 in standby. Scrutiny will log a warning
+per cycle and not update metrics until the drive is naturally awake at
+poll-time. Empirically verify on next deploy:
+- Force standby, run the collector, check `docker logs` for a graceful skip
+  (not a device drop like the info failure above).
+- Confirm the drive stays `standby` after the run.
+- Confirm the drive still shows in the UI with prior data.
+
+If `--xall -n standby` causes Scrutiny to drop the device the same way
+`--info -n standby` did, fallback plan: wrap smartctl in a script that
+intercepts exit 2 from `--xall` and returns a synthetic-but-valid SMART JSON
+with exit 0. Point `metrics_smartctl_bin` at the wrapper.
 
 ## Web UI exposure — Phase 1 (now)
 
