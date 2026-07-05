@@ -73,10 +73,10 @@ host:
   id: "raspberrypi"
 
 allow_listed_devices:
-  - /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
+  - /dev/sdb
 
 devices:
-  - device: /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
+  - device: /dev/sdb
     type: 'sat'
     commands:
       metrics_info_args:  '--info --json'                 # NO -n standby (see below)
@@ -85,6 +85,30 @@ devices:
 
 `allow_listed_devices` prevents Scrutiny from also polling the SD card,
 eMMC, or zram device that `smartctl --scan` may return.
+
+### Gotcha: Scrutiny lowercases device paths — verified 2026-07-05
+
+Scrutiny's collector YAML parser silently **lowercases the value** of the
+`device:` field before passing it to smartctl. Docs mention it lowercases
+config *keys* — it also mangles values.
+
+The WD's stable by-id symlink is uppercase:
+`/dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620`
+
+Configuring that path caused Scrutiny to invoke:
+```
+smartctl --info --json --device sat /dev/disk/by-id/ata-wdc_wd3200bpvt-24a0rt0_wd-wxc1a8026620
+```
+That lowercase path does not exist → smartctl exit 2 (device open failed) →
+Scrutiny "has no scrutiny UUID; skipping (no data association possible)".
+When the same command is run manually via `docker exec smartctl` with the
+correct uppercase path, it succeeds with exit 0. That was the whole bug.
+
+Workaround: use `/dev/sdb` (already lowercase, no mangling). Trade-off is
+that kernel names aren't as stable as by-id if the enclosure order changes,
+but on this single-USB-disk Pi it's fine. If a second USB disk is added,
+options are (a) create a lowercase udev symlink in `/dev/disk/by-id/`, or
+(b) filter by-path/by-uuid instead.
 
 ### Why -n standby is on smart_args only — verified 2026-07-05
 
