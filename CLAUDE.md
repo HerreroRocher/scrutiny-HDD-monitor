@@ -35,15 +35,13 @@ workstation and then `git clone`d onto the Pi; the app runs on the Pi only.
 ## Spindown — the non-negotiable constraint
 
 The drive is configured for aggressive power saving and this must NOT be
-defeated by the monitoring:
+defeated by nightly monitoring:
 
 - APM level 254, 20-minute idle spindown
 - Configured via `hdparm` in a udev rule at `/etc/udev/rules.d/69-hdparm.rules`
   on the Pi (owned by the OS, not this repo)
-- The Scrutiny collector polls `smartctl` on a schedule. A naive poll spins the
-  drive up. **The collector must invoke smartctl with `-n standby`** so it
-  skips the read when the drive is in standby (smartctl exits 2, no ATA
-  commands sent, drive stays asleep).
+- User preference (2026-07-05): infrequent daytime spin-ups are ACCEPTABLE
+  (once/day at a chosen time). Repeated nightly spin-ups are NOT.
 
 ### Verified 2026-07-04 on the Pi
 
@@ -60,12 +58,19 @@ sudo smartctl -n standby -a -d sat /dev/sdb   # must exit 2, no SMART table
 sudo hdparm -C /dev/sdb            # must still be standby
 ```
 
-## Scrutiny collector config essentials
+## Scrutiny collector config — final shape
 
 Verified against upstream `example.collector.yaml` (master, fetched 2026-07-04).
-Scrutiny has NO built-in "skip standby" mode. Workaround: override the raw
-smartctl arg strings so `-n standby` is included on every disk-touching
-invocation. Both keys below run on every poll cycle, so both need the flag.
+
+The strategy that survived contact with reality:
+1. **`-n standby` on NEITHER arg string.** Both breakage modes we hit
+   (first-run device drop from info, false "SMART failed" from smart) came
+   from Scrutiny treating exit 2 as a hard failure, not a "skip cycle".
+2. **Change the cron schedule to run once a day at 20:00.** This is the
+   power-saving lever, not the smartctl args. Set via env var
+   `COLLECTOR_CRON_SCHEDULE: "0 20 * * *"` in docker-compose.yml.
+3. **Manual runs (`docker exec ... scrutiny-collector-metrics run`) will
+   wake the drive.** That is expected and acceptable — the user chose that.
 
 ```yaml
 version: 1
@@ -79,8 +84,8 @@ devices:
   - device: /dev/sdb
     type: 'sat'
     commands:
-      metrics_info_args:  '--info --json'                 # NO -n standby (see below)
-      metrics_smart_args: '--xall --json -n standby'      # YES -n standby
+      metrics_info_args:  '--info --json'
+      metrics_smart_args: '--xall --json'
 ```
 
 `allow_listed_devices` prevents Scrutiny from also polling the SD card,
@@ -110,7 +115,7 @@ but on this single-USB-disk Pi it's fine. If a second USB disk is added,
 options are (a) create a lowercase udev symlink in `/dev/disk/by-id/`, or
 (b) filter by-path/by-uuid instead.
 
-### Why -n standby is on smart_args only — verified 2026-07-05
+### History: why we abandoned `-n standby` entirely — 2026-07-05
 
 First attempt put `-n standby` on both args. It failed:
 ```
@@ -133,20 +138,35 @@ So `--info` alone is safe to run against a sleeping drive on this specific
 disk+bridge. This is drive/bridge-specific behavior; if the drive is ever
 swapped, re-run that test before assuming it holds.
 
-### Remaining open risk on smart_args
+### Then: `-n standby` on `metrics_smart_args` produced a false SMART failure
 
-`--xall` (SMART data) still exits 2 in standby. Scrutiny will log a warning
-per cycle and not update metrics until the drive is naturally awake at
-poll-time. Empirically verify on next deploy:
-- Force standby, run the collector, check `docker logs` for a graceful skip
-  (not a device drop like the info failure above).
-- Confirm the drive stays `standby` after the run.
-- Confirm the drive still shows in the UI with prior data.
+With info fixed, the collector still marked the drive as "SMART failed" in
+the UI on every standby cycle. Log:
+```
+level=info  msg="Executing command: smartctl --xall --json -n standby --device sat /dev/sdb"
+level=error msg="smartctl returned an error code (2) while processing sdb"
+level=error msg="smartctl could not open device"
+level=info  msg="Publishing smartctl results for <uuid>"
+```
+Scrutiny does NOT distinguish exit-2-standby from exit-2-real-failure — it
+publishes a failure record either way. That is a persistent false alarm on
+the dashboard, which trains the user to ignore Scrutiny alerts, which
+defeats the point of running Scrutiny.
 
-If `--xall -n standby` causes Scrutiny to drop the device the same way
-`--info -n standby` did, fallback plan: wrap smartctl in a script that
-intercepts exit 2 from `--xall` and returns a synthetic-but-valid SMART JSON
-with exit 0. Point `metrics_smartctl_bin` at the wrapper.
+Wrapper script (return synthetic empty JSON with exit 0) would work but is
+brittle. Instead we solved this at the scheduling layer.
+
+### Final approach: schedule instead of skip — 2026-07-05
+
+- Remove `-n standby` from both arg strings. Let smartctl behave normally.
+- Change `COLLECTOR_CRON_SCHEDULE` from the default `0 0 * * *` (midnight)
+  to `0 20 * * *` (20:00 — prime Jellyfin evening use, drive likely awake).
+- Manual `scrutiny-collector-metrics run` calls will always wake the drive
+  if asleep; user is fine with that ("at my command" is acceptable).
+
+Net effect on power: at worst, one drive spin-up per day at 20:00 followed
+by the 20-min idle timer → ~20 min/day of extra active time. In practice
+much less because Jellyfin usually has the drive awake at that hour anyway.
 
 ## Web UI exposure — Phase 1 (now)
 

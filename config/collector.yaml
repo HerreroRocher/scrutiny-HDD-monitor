@@ -23,8 +23,12 @@ devices:
       # answers IDENTIFY DEVICE from cache. Adding -n standby here breaks the
       # first-run device registration (exit 2 → no UUID → whole device skipped).
       metrics_info_args:  '--info --json'
-      # metrics_smart_args DOES get -n standby. `--xall` reads live SMART
-      # attributes from the drive, which would otherwise force a spinup.
-      # smartctl exits 2 when standby, Scrutiny logs a skip and the dashboard
-      # retains last-known values until the drive is naturally awake.
-      metrics_smart_args: '--xall --json -n standby'
+      # metrics_smart_args also does NOT get -n standby. When Scrutiny sees
+      # exit 2 from --xall it does not skip gracefully — it publishes a
+      # "SMART failed" record for the device, which becomes a persistent
+      # false-alarm on the dashboard. Instead we rely on scheduling: the
+      # collector cron is set to run once a day at 20:00 (prime Jellyfin
+      # time when the drive is likely already spun up). One daytime
+      # spin-up per day is acceptable per user preference; nightly
+      # spin-ups are not. See COLLECTOR_CRON_SCHEDULE in compose file.
+      metrics_smart_args: '--xall --json'
