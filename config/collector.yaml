@@ -1,0 +1,21 @@
+version: 1
+
+host:
+  id: "raspberrypi"
+
+# Explicit allow-list so smartctl --scan output for the SD card / eMMC / zram
+# does not get polled. Only the WD USB drive.
+allow_listed_devices:
+  - /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
+
+devices:
+  - device: /dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620
+    # USB bridge is Realtek 0x0bda:0x9201 — smartctl needs -d sat to talk to it.
+    type: 'sat'
+    commands:
+      # -n standby makes smartctl exit 2 without touching the disk when it is
+      # in standby, preserving the 20-min hdparm spindown. Verified 2026-07-04
+      # on this exact hardware. See CLAUDE.md for the verification procedure.
+      # Both info_args and smart_args run every poll cycle, so both need it.
+      metrics_info_args:  '--info --json -n standby'
+      metrics_smart_args: '--xall --json -n standby'

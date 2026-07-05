@@ -1,0 +1,27 @@
+services:
+  scrutiny:
+    image: ghcr.io/analogj/scrutiny:v0.9.2-omnibus
+    container_name: scrutiny
+    restart: unless-stopped
+
+    # Host networking matches the Jellyfin pattern already in use on this Pi:
+    # the app binds to 0.0.0.0 on the host, and UFW per-interface rules
+    # (allow in on tailscale0, default-deny elsewhere) are the security boundary.
+    # Web UI listens on :8080. InfluxDB on :8086 is not opened by UFW so it
+    # remains reachable only from loopback / inside the host.
+    network_mode: host
+
+    cap_add:
+      - SYS_RAWIO   # required for smartctl ATA passthrough
+
+    devices:
+      # Kernel path of the WD USB-enclosed disk. The by-id symlink resolves
+      # to this same device; we bind-mount the by-id directory below so the
+      # collector config can reference the stable by-id path.
+      - /dev/sdb:/dev/sdb
+
+    volumes:
+      - ./config:/opt/scrutiny/config
+      - ./data/influxdb:/opt/scrutiny/influxdb
+      - /run/udev:/run/udev:ro
+      - /dev/disk/by-id:/dev/disk/by-id:ro
