@@ -10,10 +10,10 @@ host:
 # See CLAUDE.md for the full diagnosis. Single-drive Pi, so /dev/sdb is
 # stable enough; if a second USB disk is ever added, reassess.
 allow_listed_devices:
-  - /dev/sdb
+  - /dev/sda
 
 devices:
-  - device: /dev/sdb
+  - device: /dev/sda
     # USB bridge is Realtek 0x0bda:0x9201 — smartctl needs -d sat to talk to it.
     type: 'sat'
     commands:

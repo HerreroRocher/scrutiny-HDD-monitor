@@ -25,7 +25,7 @@ services:
       # Kernel path of the WD USB-enclosed disk. The by-id symlink resolves
       # to this same device; we bind-mount the by-id directory below so the
       # collector config can reference the stable by-id path.
-      - /dev/sdb:/dev/sdb
+      - /dev/sda:/dev/sda
 
     volumes:
       - ./config:/opt/scrutiny/config
