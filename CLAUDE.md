@@ -32,8 +32,12 @@ workstation and then `git clone`d onto the Pi; the app runs on the Pi only.
 
 - Model: WD Scorpio Blue 320 GB (`WDC WD3200BPVT-24A0RT0`)
 - Serial: `WD-WXC1A8026620`
-- Kernel device: `/dev/sdb` (single partition `/dev/sdb1`)
-- Stable path (prefer this in configs):
+- Kernel device: `/dev/sda` (single partition `/dev/sda1`) as of the current
+  boot. **This is unstable and about to change:** we're moving the configs to
+  reference the drive by its stable `/dev/disk/by-id/...` path (see below), so
+  treat every `/dev/sda` in this doc as "whatever the kernel currently
+  enumerates it as," not a fixed name.
+- Stable path (prefer this in configs — migration in progress):
   `/dev/disk/by-id/ata-WDC_WD3200BPVT-24A0RT0_WD-WXC1A8026620`
 - Filesystem: ext4, mounted at `/srv/media`
 - Transport: USB enclosure
@@ -58,17 +62,17 @@ defeated by nightly monitoring:
 
 ### Verified 2026-07-04 on the Pi
 
-- `sudo smartctl -n standby -a -d sat /dev/sdb` while drive was in standby →
+- `sudo smartctl -n standby -a -d sat /dev/sda` while drive was in standby →
   printed *"Device is in STANDBY mode, exit(2)"* and `hdparm -C` afterwards
   still reported `standby`. The USB bridge honours the ATA CHECK POWER MODE
   passthrough correctly. `-n standby` is safe on this hardware.
 
 If the bridge behaviour changes (firmware update, enclosure swap), re-run:
 ```
-sudo hdparm -y /dev/sdb            # force standby
-sudo hdparm -C /dev/sdb            # confirm: standby
-sudo smartctl -n standby -a -d sat /dev/sdb   # must exit 2, no SMART table
-sudo hdparm -C /dev/sdb            # must still be standby
+sudo hdparm -y /dev/sda            # force standby
+sudo hdparm -C /dev/sda            # confirm: standby
+sudo smartctl -n standby -a -d sat /dev/sda   # must exit 2, no SMART table
+sudo hdparm -C /dev/sda            # must still be standby
 ```
 
 ## Scrutiny collector config — final shape
@@ -91,10 +95,10 @@ host:
   id: "raspberrypi"
 
 allow_listed_devices:
-  - /dev/sdb
+  - /dev/sda
 
 devices:
-  - device: /dev/sdb
+  - device: /dev/sda
     type: 'sat'
     commands:
       metrics_info_args:  '--info --json'
@@ -122,7 +126,7 @@ Scrutiny "has no scrutiny UUID; skipping (no data association possible)".
 When the same command is run manually via `docker exec smartctl` with the
 correct uppercase path, it succeeds with exit 0. That was the whole bug.
 
-Workaround: use `/dev/sdb` (already lowercase, no mangling). Trade-off is
+Workaround: use `/dev/sda` (already lowercase, no mangling). Trade-off is
 that kernel names aren't as stable as by-id if the enclosure order changes,
 but on this single-USB-disk Pi it's fine. If a second USB disk is added,
 options are (a) create a lowercase udev symlink in `/dev/disk/by-id/`, or
@@ -142,9 +146,9 @@ No SMART poll is attempted after info fails.
 
 Follow-up test on the Pi:
 ```
-sudo hdparm -y /dev/sdb                                 # force standby
-sudo smartctl --info --json -d sat /dev/sdb ; echo $?   # exit: 0
-sudo hdparm -C /dev/sdb                                 # still: standby
+sudo hdparm -y /dev/sda                                 # force standby
+sudo smartctl --info --json -d sat /dev/sda ; echo $?   # exit: 0
+sudo hdparm -C /dev/sda                                 # still: standby
 ```
 The WD's controller answers IDENTIFY DEVICE from cache without spinning up.
 So `--info` alone is safe to run against a sleeping drive on this specific
@@ -156,8 +160,8 @@ swapped, re-run that test before assuming it holds.
 With info fixed, the collector still marked the drive as "SMART failed" in
 the UI on every standby cycle. Log:
 ```
-level=info  msg="Executing command: smartctl --xall --json -n standby --device sat /dev/sdb"
-level=error msg="smartctl returned an error code (2) while processing sdb"
+level=info  msg="Executing command: smartctl --xall --json -n standby --device sat /dev/sda"
+level=error msg="smartctl returned an error code (2) while processing sda"
 level=error msg="smartctl could not open device"
 level=info  msg="Publishing smartctl results for <uuid>"
 ```
@@ -180,6 +184,27 @@ brittle. Instead we solved this at the scheduling layer.
 Net effect on power: at worst, one drive spin-up per day at 20:00 followed
 by the 20-min idle timer → ~20 min/day of extra active time. In practice
 much less because Jellyfin usually has the drive awake at that hour anyway.
+
+### Non-bug: dashboard shows 4 hourly temperature points per day — verified 2026-07-15
+
+The temperature graph shows data at ~18:00, 19:00, 20:00 and 21:00 every day,
+which looks like the collector is running four times (four spin-ups). **It is
+not.** The collector runs exactly once, at 20:00 — confirmed against the
+container's only cron entry (`0 20 * * *` in `/etc/cron.d/scrutiny`) and
+against `docker logs scrutiny`, which shows a single `smartctl --info` +
+`smartctl --xall` pair per day.
+
+The extra points come from the drive's own onboard **SCT temperature history
+log** (`ata_sct_temperature_history` in the `--xall` JSON): a 128-slot
+circular buffer the drive's firmware samples every minute
+(`sampling_period_minutes: 1`), so at collection time it holds roughly the
+last ~2 hours of readings. Scrutiny parses that table and backdates each
+sample into InfluxDB, spreading them across the hours preceding the single
+20:00 poll — hence the 18:00–21:00 hourly buckets. Zero extra smartctl calls,
+zero extra spin-ups; the spindown constraint is intact.
+
+If you ever need to confirm the poll count again, `docker logs scrutiny |
+grep "Executing command"` is the source of truth, not the dashboard graph.
 
 ## Web UI exposure — Phase 1 (now)
 
@@ -221,7 +246,7 @@ asked for this and we chose to add it as a tiny companion service behind
 the same Caddy auth rather than a separate exposure:
 
 - Small service on the Pi (systemd timer or a lightweight sidecar
-  container) that runs `hdparm -C /dev/sdb` every ~30s and writes state to
+  container) that runs `hdparm -C /dev/sda` every ~30s and writes state to
   a file, plus a minimal HTML/text endpoint that serves it.
 - Caddy proxies e.g. `/state` (same host) to that endpoint, protected by
   the same basic auth as Scrutiny.
@@ -270,11 +295,11 @@ docker exec scrutiny /opt/scrutiny/bin/scrutiny-collector-metrics run
 ### The load-bearing verification — MUST pass before we call this done
 
 ```bash
-sudo hdparm -y /dev/sdb                                    # force standby
-sudo hdparm -C /dev/sdb                                    # expect: standby
+sudo hdparm -y /dev/sda                                    # force standby
+sudo hdparm -C /dev/sda                                    # expect: standby
 docker exec scrutiny /opt/scrutiny/bin/scrutiny-collector-metrics run
 docker logs --tail=50 scrutiny                             # look for standby skip
-sudo hdparm -C /dev/sdb                                    # MUST still be: standby
+sudo hdparm -C /dev/sda                                    # MUST still be: standby
 ```
 
 If that final `hdparm -C` reports anything other than `standby`, the whole
